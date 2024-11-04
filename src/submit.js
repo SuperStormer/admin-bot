@@ -1,11 +1,15 @@
 const path = require("path");
 const fs = require("fs");
 const mustache = require("mustache");
-const got = require("got");
+const FastRateLimit = require("fast-ratelimit").FastRateLimit;
 const server = require("./server");
 const config = require("./config");
 
 const submitPage = fs.readFileSync(path.join(__dirname, "submit.html")).toString();
+const rateLimiter = new FastRateLimit({
+	threshold: 4, // available tokens over timespan
+	ttl: 30, // time-to-live value of token bucket (in seconds)
+});
 
 server.run({}, async (req) => {
 	const challengeId = req.pathname.slice(1);
@@ -29,6 +33,7 @@ server.run({}, async (req) => {
 	if (req.method !== "POST") {
 		return { statusCode: 405 };
 	}
+
 	const body = new URLSearchParams(req.body);
 	const send = (msg) => ({
 		statusCode: 302,
@@ -36,20 +41,13 @@ server.run({}, async (req) => {
 			location: `?url=${encodeURIComponent(body.get("url"))}&msg=${encodeURIComponent(msg)}`,
 		},
 	});
-	if (process.env.APP_RECAPTCHA_SITE) {
-		const recaptchaRes = await got({
-			url: "https://www.google.com/recaptcha/api/siteverify",
-			method: "POST",
-			responseType: "json",
-			form: {
-				secret: process.env.APP_RECAPTCHA_SECRET,
-				response: body.get("recaptcha_code"),
-			},
-		});
-		if (!recaptchaRes.body.success) {
-			return send("The reCAPTCHA is invalid.");
-		}
+
+	try {
+		await rateLimiter.consume(req.ip);
+	} catch {
+		return send("Too many requests; please slow down.");
 	}
+
 	const url = body.get("url");
 	const regex = challenge.urlRegex ?? /^https?:\/\//;
 	if (!regex.test(url)) {
